@@ -1,14 +1,15 @@
 package ai.fabanonymous.my_copilot_extension;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.http.MediaType;
+import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
 
@@ -155,12 +156,14 @@ public class MyRestController {
 
     private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
+    private RestTemplate restTemplate;
 
-    public MyRestController(ChatClient.Builder builder, ObjectMapper objectMapper) {
+    public MyRestController(ChatClient.Builder builder, ObjectMapper objectMapper, RestTemplate restTemplate) {
         this.chatClient = builder
                 .defaultSystem("You are a helpful assistant that replies to user messages as if you were the Blackbeard Pirate.")
                 .build();
         this.objectMapper = objectMapper;
+        this.restTemplate = restTemplate;
     }
 
     @GetMapping("/")
@@ -169,16 +172,39 @@ public class MyRestController {
     }
 
     @PostMapping(value = "/", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public String chat(@RequestBody String bodyAsString) throws JsonProcessingException {
+    public String chat(@RequestBody String bodyAsString, HttpServletRequest httpRequest) throws JsonProcessingException {
         log.info("Payload as String is {}", bodyAsString);
 
         CopilotRequestBody bodyAsJSON = objectMapper.readValue(bodyAsString, CopilotRequestBody.class);
         log.info("Payload as JSON is {}", bodyAsJSON);
 
-        return chatClient.prompt()
-                .user("tell me a joke")
-                .call()
-                .content();
+        // Identify the user, using the GitHub API token provided in the request headers.
+        String tokenForUser = httpRequest.getHeader("X-GitHub-Token");
+        log.info("Token for User is {}", tokenForUser);
+
+        List<CopilotMessage> messages = bodyAsJSON.messages();
+        messages.add(new CopilotMessage(
+                "system",
+                "You are a helpful assistant that replies to user messages as if you were the Blackbeard Pirate."
+        ));
+        //messages.add(new CopilotMessage(
+        //        "system",
+        //        "Start every response with the user's name, which is @${user.data.login}"
+        //));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(tokenForUser);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        RequestToCopilot requestToCopilot = new RequestToCopilot(messages, false);
+        HttpEntity<RequestToCopilot> requestToCopilotAsEntity = new HttpEntity<>(requestToCopilot, headers);
+        ResponseEntity<String /*JsonNode*/> responseFromCopilotAsEntity = restTemplate.exchange(
+                "https://api.githubcopilot.com/chat/completions",
+                HttpMethod.POST,
+                requestToCopilotAsEntity,
+                String.class /*JsonNode.class*/);
+        String /*JsonNode*/ responseFromCopilot = responseFromCopilotAsEntity.getBody();
+        log.info("Response from Copilot is {}", responseFromCopilot);
+        return responseFromCopilot;
     }
 
     // http :8081/test/chat message=="Say Hello"
@@ -190,7 +216,9 @@ public class MyRestController {
                 .content();
     }
 
-    record CopilotRequestBody (
+    record RequestToCopilot(List<CopilotMessage> messages, boolean stream) {}
+
+    record CopilotRequestBody(
             String copilot_thread_id,
             List<CopilotMessage> messages
             ) {}
@@ -213,7 +241,11 @@ public class MyRestController {
             List<CopilotTools> tools,
             List<CopilotFunctions> functions,
             String model
-            ) {}
+            ) {
+        public CopilotMessage(String role, String content) {
+            this(role, content, null, null, null, null, 0, 0, 0, 0, 0, null, null, null, null, null, null, null);
+        }
+    }
     record CopilotReferences(
             String type,
             CopilotData data,
